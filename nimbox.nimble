@@ -3,7 +3,7 @@
 
 version       = "0.1.0"
 author        = "Carlo Capocasa"
-description   = "A filesystem sandbox backed by Linux Landlock"
+description   = "A filesystem sandbox backed by OS-native primitives (Landlock/Seatbelt)"
 license       = "MIT"
 srcDir        = "src"
 installExt    = @["nim"]

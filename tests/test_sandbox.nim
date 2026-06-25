@@ -26,6 +26,13 @@ proc tempDir(name: string): string =
 
 proc expectFile(path: string): bool = fileExists(path)
 
+proc systemReadDirs(): seq[string] =
+  ## Per-OS read-only system dirs for tests. macOS has no /lib or /lib64;
+  ## the seatbelt baseline covers /usr/lib and /System already, but listing
+  ## them here keeps the test self-contained on both platforms.
+  when defined(macosx): @["/usr", "/bin", "/sbin", "/etc"]
+  else: @["/usr", "/bin", "/lib", "/etc"]
+
 # --------------------------------------------------------------------------
 # CLI tests (shell out to the binary)
 
@@ -59,7 +66,7 @@ suite "nimbox CLI (sandboxed exec)":
 # --------------------------------------------------------------------------
 # library tests (fork a child per scenario)
 
-when defined(linux):
+when defined(linux) or defined(macosx):
   import nimbox
   import std/posix
 
@@ -87,7 +94,7 @@ when defined(linux):
       let a = tempDir("lib-a")
       let d = tempDir("lib-d")
       let ok = runScenario("rw") do () -> bool:
-        restrict([a], read = ["/usr", "/bin", "/lib", "/etc"])
+        restrict([a], read = systemReadDirs())
         writeFile(a / "ok.txt", "ok")
         if not fileExists(a / "ok.txt"): return false
         var raised = false
@@ -100,7 +107,7 @@ when defined(linux):
       let a = tempDir("inh-a")
       let d = tempDir("inh-d")
       let ok = runScenario("inh") do () -> bool:
-        restrict([a], read = ["/usr", "/bin", "/lib", "/etc"])
+        restrict([a], read = systemReadDirs())
         # spawn a child (sh) that tries to write outside; must be blocked
         let rc = execShellCmd("echo bad > " & d / "child.txt")
         # sh returns nonzero when redirect fails
@@ -111,10 +118,10 @@ when defined(linux):
       let a = tempDir("tight-a")
       let b = tempDir("tight-b")
       let ok = runScenario("tight") do () -> bool:
-        restrict([a, b], read = ["/usr", "/bin", "/lib", "/etc"])
+        restrict([a, b], read = systemReadDirs())
         writeFile(a / "a1.txt", "a")
         writeFile(b / "b1.txt", "b")
-        restrict([a], read = ["/usr", "/bin", "/lib", "/etc"])
+        restrict([a], read = systemReadDirs())
         writeFile(a / "a2.txt", "a2")
         # b is now denied by the second domain
         var raised = false

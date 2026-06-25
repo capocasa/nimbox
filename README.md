@@ -1,12 +1,13 @@
 # nimbox
 
-A filesystem sandbox for Nim, backed by Linux
-[Landlock](https://docs.kernel.org/userspace-api/landlock.html). Restrict a
-process (and every child it spawns) to a fixed set of writable paths. No
-root, no container, no helper binary, ~no runtime cost.
+A filesystem sandbox for Nim, backed by OS-native primitives: Linux
+[Landlock](https://docs.kernel.org/userspace-api/landlock.html) and macOS
+[Seatbelt](https://developer.apple.com/library/archive/documentation/Security/Conceptual/SecureCodingGuide/Articles/Sandboxing.html).
+Restrict a process (and every child it spawns) to a fixed set of writable
+paths. No root, no container, no helper binary, ~no runtime cost.
 
-Landlock is a Linux Security Module any unprivileged process can apply to
-itself. Once applied, the kernel enforces the policy on every syscall from
+Both backends use the same mechanism shape: an unprivileged process applies
+a restriction to itself, and the kernel enforces it on every syscall from
 the thread and all of its descendants. `mv`, `tee`, `rm -rf`, a rogue build
 script, it doesn't matter, the kernel checks every write.
 
@@ -24,13 +25,13 @@ That's the whole API. `restrict` locks the current thread down; `forkNimbox`
 
 | Platform | Status | Mechanism |
 |----------|--------|-----------|
-| Linux | **works** | Landlock (Landlock + the kernel's own VFS checks) |
-| macOS | alpha | Seatbelt (`sandbox-exec`) not yet wired up |
-| Windows | alpha | restricted token + ACLs not yet wired up |
+| Linux | **works** | Landlock (kernel-enforced, tested) |
+| macOS | **works** | Seatbelt `sandbox_init_with_parameters` (kernel-enforced) |
+| Windows | planned | restricted token + ACLs (not yet wired up) |
 
-On non-Linux, `restrict` raises `OSError` and the CLI exits with an error.
-The library structure is set up to take Seatbelt / Windows backends; see
-`sandbox-research.md` for the plan.
+On Windows, `restrict` raises `OSError` and the CLI exits with an error. See
+`CROSSPLATFORM.md` for the plan and `sandbox-research.md` for the prior-art
+survey.
 
 ## Requirements
 
@@ -138,9 +139,12 @@ CLI tests shell out to the binary; library tests fork a child per scenario
 src/
   nimbox.nim           # library + CLI (when isMainModule)
   nimbox/
-    restrict.nim       # the restrict() proc
-    process.nim        # forkNimbox / exec / wait
-    landlock.nim       # raw Landlock syscalls
+    restrict.nim       # the restrict() proc - dispatches to the OS backend
+    process.nim        # forkNimbox / exec / wait (posix fork-exec)
+    paths.nim          # path normalisation, shared across backends
+    landlock.nim       # linux backend: Landlock ruleset
+    seatbelt.nim       # macos backend: sandbox_init_with_parameters
+    acl.nim            # windows backend (stub)
 tests/
   demo.nim
   test_sandbox.nim

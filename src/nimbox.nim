@@ -1,4 +1,7 @@
-## nimbox - a filesystem sandbox backed by Linux Landlock.
+## nimbox - a filesystem sandbox backed by OS-native primitives.
+##
+## Linux uses Landlock; macOS uses Seatbelt (sandbox_init_with_parameters).
+## The user-facing API is identical on both.
 ##
 ## As a library:
 ##   import nimbox
@@ -28,7 +31,7 @@ when isMainModule:
   import std/[os, syncio]
 
   const usage = """
-nimbox - filesystem sandbox backed by Linux Landlock
+nimbox - filesystem sandbox backed by OS-native primitives
 
 Usage:
   nimbox restrict PATH [PATH ...] -- CMD [ARGS ...]
@@ -85,7 +88,13 @@ descendants. There is no "unrestrict".
 
     # System dirs are read-only so the command's binaries and libs are
     # executable but not modifiable. Writable paths come from the user.
-    restrict(paths, read = ["/usr", "/bin", "/lib", "/lib64", "/etc"])
+    when defined(macosx):
+      # macOS has no /lib or /lib64; the seatbelt backend already adds the
+      # baseline (/usr/lib, /System, /Library, /dev/*) so the dynamic linker
+      # works. Just expose the user-facing binary dirs as read-only.
+      restrict(paths, read = ["/usr", "/bin", "/sbin", "/etc"])
+    else:
+      restrict(paths, read = ["/usr", "/bin", "/lib", "/lib64", "/etc"])
     try:
       exec(cmd)
     except CatchableError as e:

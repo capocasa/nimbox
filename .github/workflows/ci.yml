@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            artifact: nimbox-linux-amd64
+            ext: tar.gz
+          - os: macos-latest
+            artifact: nimbox-macos-universal
+            ext: tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: stable
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies
+        run: nimble install -y --depsOnly
+
+      - name: Build
+        run: nim c --path:src -d:release -o:nimbox src/nimbox.nim
+
+      - name: Build x86_64 and create universal binary (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mv nimbox nimbox-arm64
+          rm -rf ~/.cache/nim/nimbox_r
+          nim c --path:src -d:release --passC:"-arch x86_64" --passL:"-arch x86_64" --cpu:amd64 -o:nimbox-x86_64 src/nimbox.nim
+          lipo -create nimbox-arm64 nimbox-x86_64 -output nimbox
+          file nimbox
+
+      - name: Run tests
+        run: nimble test
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p ${{ matrix.artifact }}
+          cp nimbox ${{ matrix.artifact }}/
+          cp README.md LICENSE ${{ matrix.artifact }}/
+          tar czf ${{ matrix.artifact }}.${{ matrix.ext }} ${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.${{ matrix.ext }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ github.ref_name }} \
+            --repo ${{ github.repository }} \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            nimbox-linux-amd64.tar.gz \
+            nimbox-macos-universal.tar.gz
