@@ -88,17 +88,34 @@ descendants. There is no "unrestrict".
 
     # System dirs are read-only so the command's binaries and libs are
     # executable but not modifiable. Writable paths come from the user.
-    when defined(macosx):
-      # macOS has no /lib or /lib64; the seatbelt backend already adds the
-      # baseline (/usr/lib, /System, /Library, /dev/*) so the dynamic linker
-      # works. Just expose the user-facing binary dirs as read-only.
-      restrict(paths, read = ["/usr", "/bin", "/sbin", "/etc"])
+    when defined(windows):
+      # Windows cannot confine the current process; restrict() only prepares
+      # the token and stamps ACLs. runSandboxed spawns the child with that
+      # token and rolls the ACLs back in a defer.
+      #
+      # No explicit read list: the ACL backend stamps a write/delete DENY
+      # on every volume root, leaving read+execute open. C:\Windows and
+      # System32 stay readable and runnable without an ALLOW ACE, so the
+      # command's exe and DLLs resolve. Passing [] is correct here.
+      try:
+        return int(runSandboxed(paths, cmd))
+      except CatchableError as e:
+        stderr.writeLine("nimbox: " & e.msg)
+        return 127
     else:
-      restrict(paths, read = ["/usr", "/bin", "/lib", "/lib64", "/etc"])
-    try:
-      exec(cmd)
-    except CatchableError as e:
-      stderr.writeLine("nimbox: " & e.msg)
-      return 127
+      # posix: confine this process, then exec into CMD. Children inherit
+      # the domain, so the parent restricting itself before exec is enough.
+      when defined(macosx):
+        # macOS has no /lib or /lib64; the seatbelt backend already adds the
+        # baseline (/usr/lib, /System, /Library, /dev/*) so the dynamic linker
+        # works. Just expose the user-facing binary dirs as read-only.
+        restrict(paths, read = ["/usr", "/bin", "/sbin", "/etc"])
+      else:
+        restrict(paths, read = ["/usr", "/bin", "/lib", "/lib64", "/etc"])
+      try:
+        exec(cmd)
+      except CatchableError as e:
+        stderr.writeLine("nimbox: " & e.msg)
+        return 127
 
   quit(cliMain())

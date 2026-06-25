@@ -27,11 +27,15 @@ That's the whole API. `restrict` locks the current thread down; `forkNimbox`
 |----------|--------|-----------|
 | Linux | **works** | Landlock (kernel-enforced, tested) |
 | macOS | **works** | Seatbelt `sandbox_init_with_parameters` (kernel-enforced) |
-| Windows | planned | restricted token + ACLs (not yet wired up) |
+| Windows | **works** | restricted token + ACLs (CreateProcessAsUser) |
 
-On Windows, `restrict` raises `OSError` and the CLI exits with an error. See
-`CROSSPLATFORM.md` for the plan and `sandbox-research.md` for the prior-art
-survey.
+The Linux and macOS backends confine the calling thread via kernel hooks
+(Landlock domains, Seatbelt profiles). The Windows backend has no single
+syscall hook; it builds a restricted token carrying a fresh SID, stamps DENY
+ACEs on volume roots and ALLOW ACEs on the writable paths, then spawns the
+child with that token. ACLs roll back after the child exits. See
+`CROSSPLATFORM.md` for the design and `sandbox-research.md` for the
+prior-art survey.
 
 ## Requirements
 
@@ -144,7 +148,7 @@ src/
     paths.nim          # path normalisation, shared across backends
     landlock.nim       # linux backend: Landlock ruleset
     seatbelt.nim       # macos backend: sandbox_init_with_parameters
-    acl.nim            # windows backend (stub)
+    acl.nim            # windows backend: restricted token + ACLs
 tests/
   demo.nim
   test_sandbox.nim

@@ -17,7 +17,8 @@ proc nimboxExe(): string =
   ## The freshly built nimbox binary at the project root. The `nimble test`
   ## task builds it there before running the tests.
   let testDir = parentDir(currentSourcePath())
-  parentDir(testDir) / "nimbox"
+  result = parentDir(testDir) / "nimbox"
+  when defined(windows): result.add(".exe")
 
 proc tempDir(name: string): string =
   result = getTempDir() / ("nimbox-test-" & name)
@@ -29,9 +30,19 @@ proc expectFile(path: string): bool = fileExists(path)
 proc systemReadDirs(): seq[string] =
   ## Per-OS read-only system dirs for tests. macOS has no /lib or /lib64;
   ## the seatbelt baseline covers /usr/lib and /System already, but listing
-  ## them here keeps the test self-contained on both platforms.
-  when defined(macosx): @["/usr", "/bin", "/sbin", "/etc"]
+  ## them here keeps the test self-contained on both platforms. Windows has
+  ## no equivalent (the ACL backend stamps volume-wide write-denies).
+  when defined(windows): @[]
+  elif defined(macosx): @["/usr", "/bin", "/sbin", "/etc"]
   else: @["/usr", "/bin", "/lib", "/etc"]
+
+proc redirectCmd(path: string): string =
+  ## A shell command that writes "ok" to `path`, using the OS's native shell.
+  ## posix uses `sh -c`; Windows uses `cmd /c` (no `sh` on a stock runner).
+  when defined(windows):
+    "cmd /c \"echo ok > " & path & "\""
+  else:
+    "sh -c 'echo ok > " & path & "'"
 
 # --------------------------------------------------------------------------
 # CLI tests (shell out to the binary)
@@ -41,23 +52,25 @@ suite "nimbox CLI (sandboxed exec)":
     let a = tempDir("cli-a")
     let d = tempDir("cli-d")
     # the allowed write runs in one invocation, the denied in another,
-    # because a failing redirect makes sh exit nonzero.
+    # because a failing redirect makes the shell exit nonzero.
     discard execCmd(nimboxExe().quoteShell & " restrict " & a.quoteShell &
-                    " -- sh -c 'echo ok > " & a / "x.txt'")
+                    " -- " & redirectCmd(a / "x.txt"))
     let rcDenied = execCmd(nimboxExe().quoteShell & " restrict " &
                            a.quoteShell &
-                           " -- sh -c 'echo bad > " & d / "y.txt'")
+                           " -- " & redirectCmd(d / "y.txt"))
     check: expectFile(a / "x.txt")
     check: rcDenied != 0
     check: not expectFile(d / "y.txt")
 
-  test "cannot modify system dir":
-    let a = tempDir("sys-a")
-    let target = "/usr/bin/nimbox_should_not_exist_" & $getCurrentProcessId()
-    let rc = execCmd(nimboxExe().quoteShell & " restrict " & a.quoteShell &
-                     " -- touch " & target)
-    check: rc != 0
-    check: not fileExists(target)
+  # posix-only: targets /usr/bin, which has no Windows analogue.
+  when not defined(windows):
+    test "cannot modify system dir":
+      let a = tempDir("sys-a")
+      let target = "/usr/bin/nimbox_should_not_exist_" & $getCurrentProcessId()
+      let rc = execCmd(nimboxExe().quoteShell & " restrict " & a.quoteShell &
+                       " -- touch " & target)
+      check: rc != 0
+      check: not fileExists(target)
 
   test "no command given errors":
     let rc = execCmd(nimboxExe().quoteShell & " restrict /tmp")
