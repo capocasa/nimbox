@@ -1,10 +1,12 @@
 ## Demo: run a command sandboxed, and show the parent stays free.
 ##
-## Two parts:
+## Three parts:
 ##   1. fork() a child, restrict() it, exec() ls. Show the child is confined.
 ##   2. Show the parent process can still write anywhere (it never restricted).
+##   3. Self-invoke the CLI with the --ro syntax: a read-only path is readable
+##      but not writable, a writable path is both.
 
-import std/[os, posix, syncio, strutils]
+import std/[os, osproc, posix, syncio, strutils]
 import nimbox
 
 const
@@ -37,6 +39,23 @@ proc main() =
   writeFile(sandboxDir & ".outside", "parent can still write anywhere")
   echo "parent wrote to ", sandboxDir, ".outside (outside the child's sandbox)"
   echo "parent can read it back: ", readFile(sandboxDir & ".outside").strip()
+
+  echo ""
+  echo "=== CLI --ro: read-only path ==="
+  let roDir = sandboxDir & "-ro"
+  createDir(roDir)
+  writeFile(roDir / "secret.txt", "topsecret\n")
+  # invoke the nimbox CLI built at the project root. --ro marks a path
+  # read+execute only; reads succeed, writes fail.
+  let exe = parentDir(parentDir(currentSourcePath())) / "nimbox"
+  echo "child reads the read-only path (succeeds):"
+  discard execCmd(exe.quoteShell & " restrict " & sandboxDir.quoteShell &
+                  " --ro " & roDir.quoteShell &
+                  " -- cat " & (roDir / "secret.txt").quoteShell)
+  echo "child writes the read-only path (fails with permission denied):"
+  discard execCmd(exe.quoteShell & " restrict " & sandboxDir.quoteShell &
+                  " --ro " & roDir.quoteShell &
+                  " -- sh -c 'echo bad > " & (roDir / "new.txt").quoteShell & "'")
 
   cleanup()
 

@@ -72,6 +72,28 @@ suite "nimbox CLI (sandboxed exec)":
       check: rc != 0
       check: not fileExists(target)
 
+  test "--ro path is readable but not writable":
+    let rw = tempDir("ro-rw")
+    let ro = tempDir("ro-ro")
+    writeFile(ro / "secret.txt", "topsecret")
+    # read from the read-only path succeeds
+    let rcRead = execCmd(nimboxExe().quoteShell & " restrict " & rw.quoteShell &
+                         " --ro " & ro.quoteShell & " -- cat " &
+                         (ro / "secret.txt").quoteShell)
+    check: rcRead == 0
+    # write to the read-only path fails
+    let rcWrite = execCmd(nimboxExe().quoteShell & " restrict " & rw.quoteShell &
+                          " --ro " & ro.quoteShell & " -- " &
+                          redirectCmd(ro / "new.txt"))
+    check: rcWrite != 0
+    check: not fileExists(ro / "new.txt")
+
+  test "--ro without writable paths errors":
+    let ro = tempDir("ro-only")
+    let rc = execCmd(nimboxExe().quoteShell & " restrict --ro " & ro.quoteShell &
+                     " -- true")
+    check: rc == 2
+
   test "no command given errors":
     let rc = execCmd(nimboxExe().quoteShell & " restrict /tmp")
     check: rc == 2

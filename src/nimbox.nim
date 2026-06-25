@@ -9,8 +9,8 @@
 ##   # this thread and all children can now only touch those paths
 ##
 ## As a binary:
-##   nimbox restrict PATH [PATH ...] -- CMD [ARGS ...]
-##   # confines itself to PATHs, then exec()s CMD
+##   nimbox restrict RWPATH [RWPATH ...] [--ro ROPATH [ROPATH ...]] -- CMD [ARGS ...]
+##   # confines itself to RWPATHs (writable) + ROPATHs (read-only), then exec()s CMD
 ##
 ## Two primitives, exposed both ways:
 ##   1. restrict(paths)  - confine the current thread's filesystem access
@@ -34,14 +34,20 @@ when isMainModule:
 nimbox - filesystem sandbox backed by OS-native primitives
 
 Usage:
-  nimbox restrict PATH [PATH ...] -- CMD [ARGS ...]
+  nimbox restrict RWPATH [RWPATH ...] [--ro ROPATH [ROPATH ...]] -- CMD [ARGS ...]
 
-  Applies a Landlock domain allowing full access (read, write, create,
-  delete, rename, execute) to the listed PATHs, then exec()s CMD. CMD and
-  its children are confined: writes outside the paths fail with EACCES.
+  Applies a sandbox allowing full access (read, write, create, delete,
+  rename, execute) to the RWPATHs, read+execute access to the ROPATHs, and
+  nothing else, then exec()s CMD. CMD and its children are confined: writes
+  outside the writable paths fail with EACCES.
+
+  System dirs (/usr, /bin, /lib, /etc) are always read-only so the command's
+  binaries and libs stay runnable; --ro adds to that set, it does not replace
+  it.
 
 Examples:
   nimbox restrict /tmp /home/me/work -- ls -la
+  nimbox restrict /build --ro /secrets -- make test
   nimbox restrict . -- make test
 
 Landlock is monotonic: the restriction is permanent for this process and all
@@ -60,9 +66,11 @@ descendants. There is no "unrestrict".
       return 2
 
     var
-      paths: seq[string] = @[]
+      writable: seq[string] = @[]
+      readOnly: seq[string] = @[]
       cmd: seq[string] = @[]
       seenSep = false
+      seenRo = false
 
     var i = 1
     while i < args.len:
@@ -71,15 +79,19 @@ descendants. There is no "unrestrict".
         cmd.add(a)
       elif a == "--":
         seenSep = true
+      elif a == "--ro":
+        seenRo = true
       elif a == "-h" or a == "--help":
         stdout.writeLine(usage); return 0
+      elif seenRo:
+        readOnly.add(a)
       else:
-        paths.add(a)
+        writable.add(a)
       inc i
 
-    if paths.len == 0:
+    if writable.len == 0:
       stderr.writeLine(usage)
-      stderr.writeLine("\nError: no paths given")
+      stderr.writeLine("\nError: no writable paths given")
       return 2
     if cmd.len == 0:
       stderr.writeLine(usage)
@@ -93,12 +105,12 @@ descendants. There is no "unrestrict".
       # the token and stamps ACLs. runSandboxed spawns the child with that
       # token and rolls the ACLs back in a defer.
       #
-      # No explicit read list: the ACL backend stamps a write/delete DENY
-      # on every volume root, leaving read+execute open. C:\Windows and
-      # System32 stay readable and runnable without an ALLOW ACE, so the
-      # command's exe and DLLs resolve. Passing [] is correct here.
+      # The ACL backend stamps a write/delete DENY on every volume root,
+      # leaving read+execute open, so C:\Windows and System32 stay readable
+      # and runnable without an ALLOW ACE. User --ro paths get an explicit
+      # ALLOW for read+execute so a denied volume can still be read from.
       try:
-        return int(runSandboxed(paths, cmd))
+        return int(runSandboxed(writable, cmd, read = readOnly))
       except CatchableError as e:
         stderr.writeLine("nimbox: " & e.msg)
         return 127
@@ -109,9 +121,10 @@ descendants. There is no "unrestrict".
         # macOS has no /lib or /lib64; the seatbelt backend already adds the
         # baseline (/usr/lib, /System, /Library, /dev/*) so the dynamic linker
         # works. Just expose the user-facing binary dirs as read-only.
-        restrict(paths, read = ["/usr", "/bin", "/sbin", "/etc"])
+        readOnly.add(["/usr", "/bin", "/sbin", "/etc"])
       else:
-        restrict(paths, read = ["/usr", "/bin", "/lib", "/lib64", "/etc"])
+        readOnly.add(["/usr", "/bin", "/lib", "/lib64", "/etc"])
+      restrict(writable, read = readOnly)
       try:
         exec(cmd)
       except CatchableError as e:

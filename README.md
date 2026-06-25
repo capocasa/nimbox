@@ -46,15 +46,17 @@ prior-art survey.
 ## As a binary
 
 ```
-nimbox restrict PATH [PATH ...] -- CMD [ARGS ...]
+nimbox restrict RWPATH [RWPATH ...] [--ro ROPATH [ROPATH ...]] -- CMD [ARGS ...]
 ```
 
-Confines itself to the listed PATHs, then exec()s CMD. System directories
-(`/usr`, `/bin`, `/lib`, `/etc`) are made read-only automatically so the
-command's binaries stay runnable.
+Confines itself to the RWPATHs (read-write) plus any ROPATHs (read-only),
+then exec()s CMD. System directories (`/usr`, `/bin`, `/lib`, `/etc`) are
+made read-only automatically so the command's binaries stay runnable;
+`--ro` adds to that set, it does not replace it.
 
 ```sh
 $ nimbox restrict /tmp /home/me/work -- ls -la
+$ nimbox restrict /build --ro /secrets -- make test
 $ nimbox restrict . -- make test
 ```
 
