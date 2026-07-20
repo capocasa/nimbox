@@ -29,6 +29,8 @@ export process
 
 when isMainModule:
   import std/[os, syncio]
+  when defined(posix):
+    import std/posix except Time
 
   const usage = """
 nimbox - filesystem sandbox backed by OS-native primitives
@@ -117,6 +119,11 @@ descendants. There is no "unrestrict".
     else:
       # posix: confine this process, then exec into CMD. Children inherit
       # the domain, so the parent restricting itself before exec is enough.
+      #
+      # setsid() runs before restrict+exec so CMD lands in its own session
+      # and process group. Callers (like 3code) that wrap long-running
+      # commands signal the whole group on cancel/timeout; without setsid
+      # those signals would miss CMD's children.
       when defined(macosx):
         # macOS has no /lib or /lib64; the seatbelt backend already adds the
         # baseline (/usr/lib, /System, /Library, /dev/*) so the dynamic linker
@@ -124,6 +131,7 @@ descendants. There is no "unrestrict".
         readOnly.add(["/usr", "/bin", "/sbin", "/etc"])
       else:
         readOnly.add(["/usr", "/bin", "/lib", "/lib64", "/etc"])
+      discard setsid()
       restrict(writable, read = readOnly)
       try:
         exec(cmd)
