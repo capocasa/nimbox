@@ -19,18 +19,30 @@
 import std/[strutils, sets]
 import ./paths
 
-const libSystem = "libSystem.dylib"
-
-# sandbox_init_with_parameters: applies a compiled profile to the calling
-# process. Profile is raw TinyScheme source. flags=0. params is an array of
-# cstring (for (param "X") substitution) terminated by nil; we pass nil and
-# string-substitute paths directly into the profile, matching MXC. errbuf
-# receives a human-readable message on failure and must be freed.
-proc sandbox_init_with_parameters(profile: cstring; flags: uint64;
+# Seatbelt's sandbox_init family is private API: the symbols live in
+# libSystem.dylib but are not in the public SDK, and `sandbox_free_errorbuf`
+# in particular is not exported on every macOS release. Importing it via
+# `{.importc, dynlib.}` resolves the symbol at load time, so a binary that
+# only ever *calls* it on the rare error path still refuses to launch on a
+# host lacking the symbol. Resolve both lazily via dlsym so the binary loads
+# everywhere and a missing free-symbol degrades to a harmless one-shot leak.
+type
+  SandboxInitWithParams = proc(profile: cstring; flags: uint64;
         params: ptr UncheckedArray[cstring]; errbuf: ptr cstring): cint
-    {.importc, dynlib: libSystem.}
-proc sandbox_free_errorbuf(buf: cstring)
-    {.importc, dynlib: libSystem.}
+      {.cdecl.}
+  SandboxFreeErrorbuf = proc(buf: cstring) {.cdecl.}
+
+proc dlsym(handle: pointer; symbol: cstring): pointer
+    {.importc, header: "<dlfcn.h>".}
+const RTLD_DEFAULT {.importc, header: "<dlfcn.h>".}: pointer
+
+proc loadSandboxInit(): SandboxInitWithParams =
+  result = cast[SandboxInitWithParams](dlsym(RTLD_DEFAULT,
+                                             "sandbox_init_with_parameters"))
+
+proc loadSandboxFree(): SandboxFreeErrorbuf =
+  result = cast[SandboxFreeErrorbuf](dlsym(RTLD_DEFAULT,
+                                           "sandbox_free_errorbuf"))
 
 # The baseline read-only system paths every macOS process needs to start.
 # From MXC's profile: the dynamic linker and standard libraries must stay
@@ -107,14 +119,18 @@ proc restrictImpl*(writable, read: openArray[string]) =
   ## full access, read paths get read + execute (via the file-read* allow on
   ## system dirs that makes exec work), everything else is denied. The
   ## profile is rebuilt from scratch each call - no state, matching Landlock.
+  let init = loadSandboxInit()
+  if init.isNil:
+    raise newException(OSError,
+      "nimbox: seatbelt unavailable (sandbox_init_with_parameters not found)")
   let profile = buildProfile(writable, read)
   var errbuf: cstring = nil
-  let r = sandbox_init_with_parameters(profile.cstring, 0'u64, nil,
-                                       addr errbuf)
+  let r = init(profile.cstring, 0'u64, nil, addr errbuf)
   if r != 0:
     var msg = "seatbelt: profile rejected"
     if errbuf != nil:
       try: msg = "seatbelt: " & $errbuf
       except CatchableError: discard
-      sandbox_free_errorbuf(errbuf)
+      let freeFn = loadSandboxFree()
+      if not freeFn.isNil: freeFn(errbuf)
     raise newException(OSError, "nimbox: " & msg)
