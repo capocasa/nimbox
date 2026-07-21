@@ -60,54 +60,61 @@ when defined(linux):
       "landlock: " & ctx & " failed (errno=" & $int(e) & ")")
 
   proc queryAbi(): int =
+    ## The kernel's highest supported Landlock ABI version, or -1 when the
+    ## kernel has no Landlock at all. Each version added access-rights bits:
+    ##   v1 (5.13): execute, read, write, remove, make_*
+    ##   v2 (5.19): REFER (rename across dirs)
+    ##   v3 (6.2):  TRUNCATE
+    ##   v4 (6.7):  IOCTL_DEV
+    ## Passing a ruleset attr or a per-rule mask with bits the running kernel
+    ## doesn't understand makes the syscall fail with EINVAL, so callers must
+    ## mask to the bits their kernel reports.
     let r = syscall(clong sysLandlockCreateRuleset, nil, 0.culong,
                     LANDLOCK_CREATE_RULESET_VERSION.cuint)
-    if r < 0: checkErrno("create_ruleset(VERSION)")
-    result = int r
+    if r < 0: result = -1 else: result = int r
 
-  proc supportedMask(): uint64 =
-    ## The set of filesystem rights *this kernel* understands. We handle all
-    ## of them so anything not explicitly allowed is denied.
-    result = LANDLOCK_ACCESS_FS_EXECUTE or
-             LANDLOCK_ACCESS_FS_WRITE_FILE or
-             LANDLOCK_ACCESS_FS_READ_FILE or
-             LANDLOCK_ACCESS_FS_READ_DIR or
-             LANDLOCK_ACCESS_FS_REMOVE_DIR or
-             LANDLOCK_ACCESS_FS_REMOVE_FILE or
-             LANDLOCK_ACCESS_FS_MAKE_CHAR or
-             LANDLOCK_ACCESS_FS_MAKE_DIR or
-             LANDLOCK_ACCESS_FS_MAKE_REG or
-             LANDLOCK_ACCESS_FS_MAKE_SOCK or
-             LANDLOCK_ACCESS_FS_MAKE_FIFO or
-             LANDLOCK_ACCESS_FS_MAKE_BLOCK or
-             LANDLOCK_ACCESS_FS_MAKE_SYM or
-             LANDLOCK_ACCESS_FS_REFER or
-             LANDLOCK_ACCESS_FS_TRUNCATE or
-             LANDLOCK_ACCESS_FS_IOCTL_DEV
+  # Full bitmask of every right nimbox knows, across all ABI versions. This
+  # is the upper bound; the kernel-supported subset is computed at restrict()
+  # time from queryAbi().
+  const allFsRights =
+    LANDLOCK_ACCESS_FS_EXECUTE or
+    LANDLOCK_ACCESS_FS_WRITE_FILE or
+    LANDLOCK_ACCESS_FS_READ_FILE or
+    LANDLOCK_ACCESS_FS_READ_DIR or
+    LANDLOCK_ACCESS_FS_REMOVE_DIR or
+    LANDLOCK_ACCESS_FS_REMOVE_FILE or
+    LANDLOCK_ACCESS_FS_MAKE_CHAR or
+    LANDLOCK_ACCESS_FS_MAKE_DIR or
+    LANDLOCK_ACCESS_FS_MAKE_REG or
+    LANDLOCK_ACCESS_FS_MAKE_SOCK or
+    LANDLOCK_ACCESS_FS_MAKE_FIFO or
+    LANDLOCK_ACCESS_FS_MAKE_BLOCK or
+    LANDLOCK_ACCESS_FS_MAKE_SYM or
+    LANDLOCK_ACCESS_FS_REFER or
+    LANDLOCK_ACCESS_FS_TRUNCATE or
+    LANDLOCK_ACCESS_FS_IOCTL_DEV
 
-  proc readRights(): AccessFds =
-    ## The "read" rights bundle: execute + read file + read dir.
+  proc maskForAbi(abi: int): uint64 =
+    ## The rights bits valid for the running kernel's ABI version. Drops the
+    ## bits newer than the kernel supports so create_ruleset/add_rule don't
+    ## fail with EINVAL on older kernels.
+    result = allFsRights
+    if abi < 2: result = result and not LANDLOCK_ACCESS_FS_REFER
+    if abi < 3: result = result and not LANDLOCK_ACCESS_FS_TRUNCATE
+    if abi < 4: result = result and not LANDLOCK_ACCESS_FS_IOCTL_DEV
+
+  proc readRights(mask: uint64): AccessFds =
+    ## The "read" rights bundle: execute + read file + read dir, masked to
+    ## what the kernel supports.
     AccessFds(uint64(LANDLOCK_ACCESS_FS_EXECUTE or
                      LANDLOCK_ACCESS_FS_READ_FILE or
-                     LANDLOCK_ACCESS_FS_READ_DIR))
+                     LANDLOCK_ACCESS_FS_READ_DIR) and mask)
 
-  proc writeRights(): AccessFds =
-    ## Everything: full read + all the mutating ops we handle. Granting this
-    ## to a path makes it fully usable.
-    AccessFds(uint64(readRights()) or
-              LANDLOCK_ACCESS_FS_WRITE_FILE or
-              LANDLOCK_ACCESS_FS_REMOVE_DIR or
-              LANDLOCK_ACCESS_FS_REMOVE_FILE or
-              LANDLOCK_ACCESS_FS_MAKE_CHAR or
-              LANDLOCK_ACCESS_FS_MAKE_DIR or
-              LANDLOCK_ACCESS_FS_MAKE_REG or
-              LANDLOCK_ACCESS_FS_MAKE_SOCK or
-              LANDLOCK_ACCESS_FS_MAKE_FIFO or
-              LANDLOCK_ACCESS_FS_MAKE_BLOCK or
-              LANDLOCK_ACCESS_FS_MAKE_SYM or
-              LANDLOCK_ACCESS_FS_REFER or
-              LANDLOCK_ACCESS_FS_TRUNCATE or
-              LANDLOCK_ACCESS_FS_IOCTL_DEV)
+  proc writeRights(mask: uint64): AccessFds =
+    ## Everything: full read + all the mutating ops we handle, masked to what
+    ## the kernel supports. Granting this to a path makes it fully usable.
+    AccessFds(uint64(readRights(mask)) or
+              ((allFsRights and not uint64(readRights(allFsRights))) and mask))
 
   proc openPath(path: string): cint =
     result = rawOpen(path, 0o2000000)  # O_PATH (010000000 octal)
@@ -123,11 +130,15 @@ when defined(linux):
       abi: int
 
   proc createRuleset(): Ruleset =
-    let mask = supportedMask()
+    let abi = queryAbi()
+    if abi < 0:
+      raise newException(OSError,
+        "landlock: kernel does not support landlock (create_ruleset " &
+        "version probe failed)")
+    let mask = maskForAbi(abi)
     let attr = RulesetAttr(handledAccessFs: mask,
                            handledAccessNet: 0,
                            scoped: 0)
-    let abi = queryAbi()
     let fd = syscall(clong sysLandlockCreateRuleset,
                      unsafeAddr attr, sizeof(attr).culong, 0.cuint)
     if fd < 0: checkErrno("create_ruleset")
@@ -175,8 +186,9 @@ when defined(linux):
     ## is denied.
     var rs = createRuleset()
     try:
-      let w = writeRights()
-      let r = readRights()
+      let mask = maskForAbi(rs.abi)
+      let w = writeRights(mask)
+      let r = readRights(mask)
       var seen = initHashSet[string]()
       for p in writable:
         let n = normalize(p)
