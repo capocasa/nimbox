@@ -27,14 +27,13 @@ import ./paths
 # host lacking the symbol. Resolve both lazily via dlsym so the binary loads
 # everywhere and a missing free-symbol degrades to a harmless one-shot leak.
 type
-  SandboxInitWithParams = proc(profile: cstring; flags: uint64;
-        params: ptr UncheckedArray[cstring]; errbuf: ptr cstring): cint
-      {.cdecl.}
+  SandboxInitWithParams = proc(profile: cstring, flags: uint64,
+        params: ptr UncheckedArray[cstring], errbuf: ptr cstring): cint {.cdecl.}
   SandboxFreeErrorbuf = proc(buf: cstring) {.cdecl.}
 
 proc dlsym(handle: pointer; symbol: cstring): pointer
     {.importc, header: "<dlfcn.h>".}
-const RTLD_DEFAULT {.importc, header: "<dlfcn.h>".}: pointer
+var RTLD_DEFAULT {.importc, header: "<dlfcn.h>".}: pointer
 
 proc loadSandboxInit(): SandboxInitWithParams =
   result = cast[SandboxInitWithParams](dlsym(RTLD_DEFAULT,
